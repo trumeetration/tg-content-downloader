@@ -8,6 +8,7 @@ dependencies = [
     "aio-pika>=9.5.8",
     "aiofiles>=25.1.0",
     "aiogram>=3.24.0",
+    "alembic>=1.18.4",
     "asyncpg>=0.31.0",
     "python-dotenv>=1.2.1",
     "sqlalchemy[asyncio]>=2.0.46",
