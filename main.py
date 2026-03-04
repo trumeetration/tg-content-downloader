@@ -2,21 +2,25 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import logging
+from logging.handlers import RotatingFileHandler
 import re
+from typing import List
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 from aiogram import F, Bot, Dispatcher, html
-from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, LinkPreviewOptions, BufferedInputFile, FSInputFile
+from aiogram.filters import CommandStart
+from aiogram.types import Message, LinkPreviewOptions, FSInputFile, InputMediaVideo, InputMediaPhoto, URLInputFile
 import aio_pika
 import aio_pika.abc
 import aiohttp
-from sqlalchemy import select
+from sqlalchemy import select, Result
+from sqlalchemy.orm import selectinload
 import aiofiles
 
 from contracts import LinkResult
 from db.database import create_engine, ensure_tables
-from db.models import CachedContent
+from db.models import CachedContent, ContentFile
 from config import (
     TOKEN, 
     DB_HOST,
@@ -28,7 +32,21 @@ from config import (
 )
 
 
-LINK_PATTERN = r"https://www\.youtube\.com/(?:watch\?v=[A-Za-z0-9-]+.*|shorts/)|https://www.instagram.com/reel/[A-Za-z0-9]+.*"
+LINK_PATTERN = r"https://www\.youtube\.com/(?:watch\?v=[A-Za-z0-9-]+.*|shorts/)|https://www.instagram.com/(?:reel|p)/[A-Za-z0-9]+.*"
+
+# Настройка логгера
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        RotatingFileHandler("bot.log", maxBytes=15 * 1024 * 1024, backupCount=5),
+        logging.StreamHandler()
+    ]
+)
+
+logging.getLogger("aio_pika").setLevel(logging.WARNING)
+
+logger = logging.getLogger(__name__)
 
 dp = Dispatcher()
 bot = Bot(token=TOKEN)
@@ -101,6 +119,27 @@ def get_content_id_from_url(url: str) -> str:
         return url.split('/')[-1]
 
 
+async def add_url_to_queue(url: str, chat_id: int):
+    connection: aio_pika.abc.AbstractConnection = await aio_pika.connect(RABBITMQ_URL)
+
+    channel: aio_pika.abc.AbstractChannel = await connection.channel()
+
+    queue_msg = json.dumps({
+        "chat_id": chat_id,
+        "link": url
+    }).encode()
+
+    await channel.default_exchange.publish(
+        aio_pika.Message(
+            body=queue_msg
+        ),
+        routing_key="link_requests"
+    )
+
+    await connection.close()
+
+
+
 @dp.message(CommandStart())
 async def command_start_handler(message: Message) -> None:
     await message.answer(f"Hello, {html.bold(message.from_user.full_name)}!")
@@ -111,7 +150,7 @@ async def handle_link(message: Message):
     text = message.text
 
     if re.search(LINK_PATTERN, text) is None:
-        return await message.answer(text="Only links from Youtube and Insta can be processed")
+        return await message.answer(text="Only links from Youtube can be processed")
 
     url = format_url(text)
     content_id = get_content_id_from_url(url)
@@ -124,38 +163,42 @@ async def handle_link(message: Message):
     """
 
     async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(CachedContent).where(CachedContent.url == url)
+        stmt = (
+            select(CachedContent)
+            .where(CachedContent.url == url)
+            .options(selectinload(CachedContent.files))
         )
+        result: Result = await session.execute(stmt)
         cached_content = result.scalar_one_or_none()
 
-    if cached_content:
-        return await message.answer_video(video=cached_content.telegram_file_id)
+    if cached_content and cached_content.files:
+        logger.info(f"Content with url {url} found in cache with {len(cached_content.files)} files.")
+        
+        # If only one file, send it directly for a cleaner look
+        if len(cached_content.files) == 1:
+            file = cached_content.files[0]
+            if file.is_video:
+                return await message.answer_video(video=file.telegram_file_id)
+            else:
+                return await message.answer_photo(photo=file.telegram_file_id)
+
+        # If multiple files, send as a media group
+        media_group = []
+        for file in cached_content.files:
+            media = InputMediaVideo(media=file.telegram_file_id) if file.is_video else InputMediaPhoto(media=file.telegram_file_id)
+            media_group.append(media)
+        
+        return await message.answer_media_group(media=media_group)
 
     # Add task for Download Service
-    connection: aio_pika.abc.AbstractConnection = await aio_pika.connect(RABBITMQ_URL)
-
-    channel: aio_pika.abc.AbstractChannel = await connection.channel()
-
-    queue_msg = json.dumps({
-        "chat_id": message.chat.id,
-        "link": text
-    }).encode()
-
-    await channel.default_exchange.publish(
-        aio_pika.Message(
-            body=queue_msg
-        ),
-        routing_key="link_requests"
-    )
-
-    await connection.close()
+    
+    await add_url_to_queue(url, message.chat.id)
 
     await message.reply(f'You send link {text}', link_preview_options=LinkPreviewOptions(is_disabled=True))
 
 
 async def download_file(session: aiohttp.ClientSession, url: str, dest: str) -> None:
-    print(f'Downloading {url}')
+    logger.info(f'Downloading {url}')
     async with session.get(url) as response:
         async with aiofiles.open(dest, "wb") as f:
             async for chunk in response.content.iter_chunked(1024):
@@ -163,7 +206,7 @@ async def download_file(session: aiohttp.ClientSession, url: str, dest: str) -> 
 
 
 async def start_consumer(bot: Bot):
-    print("Waiting for completed tasks")
+    logger.info("Waiting for completed tasks")
 
     connection: aio_pika.abc.AbstractConnection = await aio_pika.connect(RABBITMQ_URL)
 
@@ -175,7 +218,7 @@ async def start_consumer(bot: Bot):
         async for message in queue_iter:
             async with message.process():
                 message_body = message.body.decode()
-                print(f'Consumer received message - {message_body}')
+                logger.info(f'Consumer received message - {message_body}')
                 link_result: LinkResult = json.loads(message_body)
 
                 is_success = link_result["success"]
@@ -188,7 +231,7 @@ async def start_consumer(bot: Bot):
                             text=text
                         )
                     except Exception as e:
-                        print(f'Exception while notifying user that link wasnt processed properply: {e}')
+                        logger.error(f'Exception while notifying user that link wasnt processed properply: {e}')
                         await bot.send_message(
                             chat_id=link_result["chat_id"],
                             text="Unable to process link"
@@ -196,61 +239,95 @@ async def start_consumer(bot: Bot):
                     
                     continue
                 
-                content_url = link_result["result_content_url"]
-                thumbnail_url = link_result["result_thumbnail_url"]
-                content_filename = content_url.split('/')[-1]
-                thumbnail_filename = thumbnail_url.split('/')[-1]
+                downloaded_files = []
+                try:
+                    # We need to download video files to get their metadata (width, height, duration)
+                    # and to reliably attach a custom thumbnail.
+                    # For photos, we can pass the URL directly to Telegram.
+                    
+                    video_items_to_download = []
+                    for item in link_result["content_items"]:
+                        if item["is_video"]:
+                            video_items_to_download.append(item)
 
-                async with aiohttp.ClientSession() as session:
-                    await asyncio.gather(
-                        download_file(session, content_url, content_filename),
-                        download_file(session, thumbnail_url, thumbnail_filename),
-                    )
+                    async with aiohttp.ClientSession() as session:
+                        download_tasks = []
+                        for item in video_items_to_download:
+                            content_url = f'{link_result["bucket_base_url"]}/{item["content_path"]}'
+                            thumbnail_url = f'{link_result["bucket_base_url"]}/{item["thumbnail_path"]}'
+                            
+                            content_filename = item["content_path"].split('/')[-1]
+                            thumbnail_filename = item["thumbnail_path"].split('/')[-1]
 
-                    w, h, duration = await get_video_meta_async(content_filename)
+                            # Add to list for future cleanup
+                            downloaded_files.append(content_filename)
+                            downloaded_files.append(thumbnail_filename)
 
-                    content_file = FSInputFile(
-                        path=content_filename,
-                        filename=content_filename
-                    )
+                            # Create download tasks
+                            download_tasks.append(download_file(session, content_url, content_filename))
+                            download_tasks.append(download_file(session, thumbnail_url, thumbnail_filename))
+                        
+                        if download_tasks:
+                            await asyncio.gather(*download_tasks)
+                            logger.info(f'Downloaded {len(downloaded_files)} files for videos for request {link_result["requested_url"]}')
 
-                    print(f'Sending video to chat {link_result["chat_id"]}')
+                    media_group = []
 
-                    video_send_result = await bot.send_video(
+                    for i, item in enumerate(link_result["content_items"]):
+                        content_filename = item["content_path"].split('/')[-1]
+
+                        if item["is_video"]:
+                            thumbnail_filename = item["thumbnail_path"].split('/')[-1]
+                            w, h, duration = await get_video_meta_async(content_filename)
+                            media = InputMediaVideo(
+                                media=FSInputFile(path=content_filename),
+                                thumbnail=FSInputFile(path=thumbnail_filename),
+                                width=w,
+                                height=h,
+                                duration=duration,
+                                supports_streaming=True
+                            )
+                        else: # It's a photo
+                            content_url = f'{link_result["bucket_base_url"]}/{item["content_path"]}'
+                            # For photos, we don't need metadata, so we can pass the URL directly.
+                            # Using URLInputFile is more explicit than passing a raw string.
+                            media = InputMediaPhoto(
+                                media=URLInputFile(content_url)
+                            )
+                        
+                        media_group.append(media)
+                    
+                    logger.info(f'Sending media group to chat {link_result["chat_id"]}')
+                    sent_messages = await bot.send_media_group(
                         chat_id=link_result["chat_id"],
-                        video=content_file,
-                        supports_streaming=True,
-                        thumbnail=FSInputFile(path=thumbnail_filename),
-                        width=w,
-                        height=h,
-                        duration=duration,
+                        media=media_group
                     )
-                    video_file_id = video_send_result.video.file_id
-
-                    print(f'Sent video. File id - {video_file_id}')
-                    # await bot.send_message(
-                    #     chat_id=link_result["chat_id"],
-                    #     text="A video could be here"
-                    # )
-
-                    print(f'Deleting files {content_filename} and thumbnail {thumbnail_filename}')
-                    os.remove(content_filename)
-                    os.remove(thumbnail_filename)
-                    print('Temp files has been deleted')
+                    
+                    logger.info(f'Sent media group')
 
                     async with AsyncSessionLocal() as db_session:
                         url = format_url(link_result["requested_url"])
 
-                        cached_content = CachedContent(
-                            url=url,
-                            telegram_file_id=video_file_id,
-                            name=content_filename
-                        )
+                        content_files: List[ContentFile] = []
+                        for message in sent_messages:
+                            is_video = message.video is not None
+                            telegram_file_id = message.video.file_id if is_video else message.photo[-1].file_id
+                            content_files.append(ContentFile(telegram_file_id=telegram_file_id, is_video=is_video))
+                        cached_content = CachedContent(url=url, files=content_files)
                         db_session.add(cached_content)
-
                         await db_session.commit()
-
-                        print(f'Saved video {url} with file_id {video_file_id} in database')
+                        logger.info(f'Saved {url} with {len(content_files)} files in database')
+                finally:
+                    logger.info(f'Deleting temporary files: {downloaded_files}')
+                    for f_path in downloaded_files:
+                        try:
+                            os.remove(f_path)
+                        except OSError as e:
+                            logger.error(f"Error deleting file {f_path}: {e}")
+                    if downloaded_files:
+                        logger.info('Temp video files have been deleted')
+                    else:
+                        logger.info('No temporary files to delete')
                 
 
 async def main():
