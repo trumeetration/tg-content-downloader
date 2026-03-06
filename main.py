@@ -32,7 +32,8 @@ from config import (
 )
 
 
-LINK_PATTERN = r"https://www\.youtube\.com/(?:watch\?v=[A-Za-z0-9-]+.*|shorts/)|https://www.instagram.com/(?:reel|p)/[A-Za-z0-9]+.*"
+GENERAL_LINK_PATTERN = re.compile(r"https://www\.youtube\.com/(?:watch\?v=[A-Za-z0-9-]+.*|shorts/)|https://www\.instagram\.com/(?:reel|p)/[A-Za-z0-9]+.*", re.IGNORECASE)
+YOUTUBE_DEFAULT_LINK_PATTERN = re.compile(r'https://www\.youtube\.com/watch\?v=[A-Za-z0-9-]+.*', re.IGNORECASE)
 
 # Настройка логгера
 logging.basicConfig(
@@ -101,8 +102,7 @@ def format_url(full_url: str) -> str:
     query_params = parse_qs(parsed_url.query)
 
     new_query_params = {}
-    is_youtube_link = bool(re.search(r'https://www.youtube.com/watch\?v=[A-Za-z0-9-]+.*', full_url))
-    if is_youtube_link:
+    if YOUTUBE_DEFAULT_LINK_PATTERN.search(full_url):
         new_query_params["v"] = query_params["v"][0]
 
     new_url = urlunparse(parsed_url._replace(query=urlencode(new_query_params))).rstrip('/')
@@ -110,7 +110,7 @@ def format_url(full_url: str) -> str:
 
 
 def get_content_id_from_url(url: str) -> str:
-    if re.search(r'https://www.youtube.com/watch\?v=[A-Za-z0-9-]+.*', url):
+    if YOUTUBE_DEFAULT_LINK_PATTERN.search(url):
         parsed = urlparse(url)
         query_params = parse_qs(parsed.query)
         return query_params["v"][0]
@@ -149,18 +149,10 @@ async def command_start_handler(message: Message) -> None:
 async def handle_link(message: Message):
     text = message.text
 
-    if re.search(LINK_PATTERN, text) is None:
-        return await message.answer(text="Only links from Youtube can be processed")
+    if GENERAL_LINK_PATTERN.search(text) is None:
+        return await message.answer(text="Only links from Youtube and Inst can be processed")
 
     url = format_url(text)
-    content_id = get_content_id_from_url(url)
-    """
-    TODO: надо поменять логику хранения инфы о сохраненных файлах. 
-    Пользователь может прислать ссылку со старым post_id но с уникальными query_params. 
-    Лучше скорее всего хранить в бд не ссылку а идентификатор контента и ссылку
-
-    TODO: с инатсграма могут скачивать фото, и в этом методе надо проверять какой контент хранится в бд - фото или видео
-    """
 
     async with AsyncSessionLocal() as session:
         stmt = (
