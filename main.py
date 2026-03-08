@@ -124,9 +124,9 @@ def get_content_id_from_url(url: str) -> str:
 
 
 async def add_url_to_queue(url: str, chat_id: int):
-    connection: aio_pika.abc.AbstractConnection = await aio_pika.connect(RABBITMQ_URL)
+    connection: aio_pika.abc.AbstractRobustConnection = await aio_pika.connect_robust(RABBITMQ_URL)
 
-    channel: aio_pika.abc.AbstractChannel = await connection.channel()
+    channel: aio_pika.abc.AbstractRobustChannel = await connection.channel()
 
     queue_msg = json.dumps({
         "chat_id": chat_id,
@@ -204,11 +204,11 @@ async def download_file(session: aiohttp.ClientSession, url: str, dest: str) -> 
 async def start_consumer(bot: Bot):
     logger.info("Waiting for completed tasks")
 
-    connection: aio_pika.abc.AbstractConnection = await aio_pika.connect(RABBITMQ_URL)
+    connection: aio_pika.abc.AbstractRobustConnection = await aio_pika.connect_robust(RABBITMQ_URL)
 
-    channel: aio_pika.abc.AbstractChannel = await connection.channel()
+    channel: aio_pika.abc.AbstractRobustChannel = await connection.channel()
 
-    queue: aio_pika.abc.AbstractQueue = await channel.declare_queue("link_results")
+    queue: aio_pika.abc.AbstractRobustQueue = await channel.declare_queue("link_results")
 
     async with queue.iterator() as queue_iter:
         async for message in queue_iter:
