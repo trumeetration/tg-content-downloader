@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: postgres:latest
+    container_name: download-container
+    environment:
+      POSTGRES_USER: ${DATABASE_USERNAME}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD}
+      POSTGRES_DB: ${DATABASE_NAME}
+    ports:
+      - ${DATABASE_PORT}:${DATABASE_PORT}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:4-management
+    hostname: my-rabbit
+    container_name: my-rabbit
+    restart: always
+    environment:
+      - RABBITMQ_DEFAULT_USER=${RABBITMQ_USERNAME}
+      - RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASSWORD}
+    ports:
+      - ${RABBITMQ_UI_PORT}:${RABBITMQ_UI_PORT}
+      - ${RABBITMQ_PORT}:${RABBITMQ_PORT}
+
+  bot:
+    image: tg-download-bot
+    build: .
+    container_name: bot-container
+    env_file:
+      - ./.env
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
