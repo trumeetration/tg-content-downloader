@@ -28,6 +28,8 @@ services:
     image: tg-download-bot
     build: .
     container_name: bot-container
+    depends_on:
+      - rabbitmq
     env_file:
       - ./.env
     restart: unless-stopped
