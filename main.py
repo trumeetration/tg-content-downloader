@@ -28,12 +28,16 @@ from config import (
     DB_USERNAME,
     DB_PASSWORD,
     DB_NAME,
-    RABBITMQ_URL
+    RABBITMQ_HOST,
+    RABBITMQ_PORT,
+    RABBITMQ_USERNAME,
+    RABBITMQ_PASSWORD
 )
 
 
 GENERAL_LINK_PATTERN = re.compile(r"https://www\.youtube\.com/(?:watch\?v=[A-Za-z0-9-]+.*|shorts/)|https://www\.instagram\.com/(?:reel|p)/[A-Za-z0-9]+.*", re.IGNORECASE)
 YOUTUBE_DEFAULT_LINK_PATTERN = re.compile(r'https://www\.youtube\.com/watch\?v=[A-Za-z0-9-]+.*', re.IGNORECASE)
+RABBITMQ_URL = f'amqp://{RABBITMQ_USERNAME}:{RABBITMQ_PASSWORD}@{RABBITMQ_HOST}:{RABBITMQ_PORT}/'
 
 # Настройка логгера
 logging.basicConfig(
