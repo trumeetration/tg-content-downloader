@@ -124,7 +124,7 @@ def get_content_id_from_url(url: str) -> str:
 
 
 async def add_url_to_queue(url: str, chat_id: int):
-    connection: aio_pika.abc.AbstractRobustConnection = await aio_pika.connect_robust(RABBITMQ_URL)
+    connection: aio_pika.abc.AbstractRobustConnection = await connect_rabbit(RABBITMQ_URL)
 
     channel: aio_pika.abc.AbstractRobustChannel = await connection.channel()
 
@@ -142,6 +142,20 @@ async def add_url_to_queue(url: str, chat_id: int):
 
     await connection.close()
 
+
+async def connect_rabbit(rabbitmq_url: str):
+    while True:
+        try:
+            connection = await aio_pika.connect_robust(
+                rabbitmq_url,
+                reconnect_interval=5
+            )
+            logging.info("Connected to RabbitMQ")
+            return connection
+
+        except Exception as e:
+            logging.warning("RabbitMQ not ready, retrying in 5s...")
+            await asyncio.sleep(5)
 
 
 @dp.message(CommandStart())
@@ -204,7 +218,7 @@ async def download_file(session: aiohttp.ClientSession, url: str, dest: str) -> 
 async def start_consumer(bot: Bot):
     logger.info("Waiting for completed tasks")
 
-    connection: aio_pika.abc.AbstractRobustConnection = await aio_pika.connect_robust(RABBITMQ_URL)
+    connection: aio_pika.abc.AbstractRobustConnection = await connect_rabbit(RABBITMQ_URL)
 
     channel: aio_pika.abc.AbstractRobustChannel = await connection.channel()
 
