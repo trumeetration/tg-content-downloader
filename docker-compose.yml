@@ -7,7 +7,7 @@ services:
       POSTGRES_PASSWORD: ${DATABASE_PASSWORD}
       POSTGRES_DB: ${DATABASE_NAME}
     ports:
-      - ${DATABASE_PORT}:${DATABASE_PORT}
+      - ${DATABASE_EXTERNAL_PORT}:${DATABASE_PORT}
     volumes:
       - postgres_data:/var/lib/postgresql
     restart: unless-stopped
@@ -16,7 +16,7 @@ services:
     image: rabbitmq:4-management
     hostname: my-rabbit
     container_name: my-rabbit
-    restart: always
+    restart: unless-stopped
     environment:
       - RABBITMQ_DEFAULT_USER=${RABBITMQ_USERNAME}
       - RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASSWORD}
